@@ -7,10 +7,8 @@ from mpi4py import  MPI
 import numpy as np
 import matplotlib.pyplot as plt
 
-def peroidic_wrapping(data, box):
-    return ((data%box)+box)%box
 
-def mpi_grid_redistribute(data, pos, grid_topology, box_lengths, comm = comm, overload_lengths = None, peroidic=True):
+def mpi_grid_redistribute(data, pos, grid_topology, box_lengths, comm , overload_lengths = None, peroidic=True):
     redist = MPIGridRedistributor(comm, grid_topology, box_lengths)
     return redist.redistriubte_by_position(data, pos, overload_lengths = overload_lengths, peroidic=peroidic)
 
@@ -46,7 +44,7 @@ class MPIGridRedistributor:
         assert ranks_required <= self.size, "We have have {} ranks. The topology {} requires at least {} ranks".format(self.size, self.grid_topology, ranks_required)
         self.dim = len(self.grid_topology)
         self.box_length = np.array(box_length)
-        assert len(self.dim) == len(self.box_length), "The number dimensions in grid_topoloby ({}), must be the same as in box_length ({})".format(len(self.grid_topology), len(self.box_length))
+        assert self.dim == len(self.box_length), "The number dimensions in grid_topoloby ({}), must be the same as in box_length ({})".format(len(self.grid_topology), len(self.box_length))
         # The uniform length of each grid cell in each dimension
         self.cell_length = np.zeros(self.dim)
         for d in range(0, self.dim):
@@ -67,7 +65,7 @@ class MPIGridRedistributor:
             
         for d in range(0, self.dim):
             if peroidic:
-                position[:,d] =peroidic_wrapping(position[:,d], self.box_length[d])
+                position[:,d] =self._peroidic_wrapping(position[:,d], self.box_length[d])
             data = (position[:,d]/self.box_length[d]*self.grid_topology[d]).astype(np.int)
             cell_indexes[:,d] = data
         return cell_indexes
@@ -77,13 +75,13 @@ class MPIGridRedistributor:
         if not peroidic:
             for d in range(0, self.dim):
                 cell_num += self.cell_index_offset[d]*indexes[:,d]
-            if _check_range:
+            if check_range:
                 for d in range(0, self.dim):
-                    slct_outside = (indexes[:,d] > 0) & (indexes[:,d] < self.grid_topology[d])
+                    slct_outside = (indexes[:,d] < 0) & (indexes[:,d] >= self.grid_topology[d])
                     cell_num[slct_outside] = -1
         else:
             for d in range(0, self.dim):
-                cell_num += self.cell_index_offset[d] * (peroidic_wrapping(indexes[:, d], self.grid_topology[d]))
+                cell_num += self.cell_index_offset[d] * (self._peroidic_wrapping(indexes[:, d], self.grid_topology[d]))
         return cell_num
 
     def get_cell_number_from_position(self, position, peroidic=True):
@@ -115,7 +113,7 @@ class MPIGridRedistributor:
         return limits
 
     def redistribute_by_position(self, data, position, peroidic=True, 
-                                 overload_length = None, return_positions = False):
+                                 overload_lengths = None, return_positions = False):
         """
 
         Note: This function only uses
@@ -159,16 +157,16 @@ class MPIGridRedistributor:
         rank_to_send = self.get_cell_number_from_position(position, peroidic=peroidic)
         assert np.min(rank_to_send) >= 0, "Trying to send to a negative rank. \nPosition is probably outside of box length"
         assert np.max(rank_to_send) < self.size, "Trying to send to a too rank number highre than max. \nPosition is probably outside of box length"
-        local_data = redistribute_by_cell_number(self, data, rank_to_send)
-        if overload_length is None:
+        local_data = self.redistribute_by_cell_number(data, rank_to_send)
+        if overload_lengths is None:
             return local_data
         else:
-            local_position = redistribute_by_cell_number(position, rank_to_send)
-            overload_data = overload_buffer_matrix(local_data, local_position, overload_length)
-            np.concatenate(local_data, overload_data, axis = 0)
+            local_position = self.redistribute_by_cell_number(position, rank_to_send)
+            overload_data = self.exchange_overload_by_position(local_data, local_position, overload_lengths)
+            np.concatenate((local_data, overload_data), axis = 0)
         return 
         
-    def redistribute_matrix_by_cell_number(self, data, rank_to_send):
+    def redistribute_by_cell_number(self, data, rank_to_send):
         """
         This function redistributes the data by sending each data element
         to the rank specified. If the specified rank does not exist, that
@@ -196,10 +194,13 @@ class MPIGridRedistributor:
         # pass a list of strings or something
         send_buff = []
         for i in range(0, self.size):
-            send_buff.append(data[rank_to_send==i])
-        return np.concatenate(self.comm.alltoall(send_buff))
+            tmp = data[rank_to_send==i]
+            send_buff.append(tmp)
+        result = np.concatenate(self.comm.alltoall(send_buff))
+        return result
        
-    def overload_buffer_matrix(self, data, position, overload_length, return_positions=false):
+    def exchange_overload_by_position(self, data, position, overload_lengths, 
+                                      return_positions=False, peroidic=True):
         """
         This function takes in the data that is divided already into cells
         and overloads a region around them. Note: This function only uses
@@ -235,7 +236,7 @@ class MPIGridRedistributor:
 
          
         """
-
+        assert len(overload_lengths) == self.dim, "Overload lengths must be the same length as the dimensions"
         # TODO: Check that data is within the bounding box for the mpi rank
         
         overload_shape = np.array(np.shape(data))
@@ -254,7 +255,17 @@ class MPIGridRedistributor:
             indexes_b = self.rank_cell_index + offset_b
             cell_num_a = self.get_cell_number_from_indexes(np.array([indexes_a]))[0] # rank num to the right
             cell_num_b = self.get_cell_number_from_indexes(np.array([indexes_b]))[0] # rank num to the left
-            
+            if not peroidic:
+                # If we are talkign to a cell across a peroidic boundary, we will flag it and not
+                # send any data
+                cell_num_a_2 = self.get_cell_number_from_indexes(np.array([indexes_a]), peroidic=False)[0] # rank num to the right
+                cell_num_b_2 = self.get_cell_number_from_indexes(np.array([indexes_b]), peroidic=False)[0] # rank num to the left
+                send_data_cell_num_a = cell_num_a_2 == cell_num_a
+                send_data_cell_num_b = cell_num_b_2 == cell_num_b
+            else:
+                send_data_cell_num_a = True
+                send_data_cell_num_b = True
+
             # Send data twice. Once for the "offical" data and a second time for position data. 
             for datapos, overload_datapos, output_index in [(data, overload_data, 0), (position, overload_position, 1)]:
                 # Here we will send data to the right and left rank in dimension d. 
@@ -265,16 +276,15 @@ class MPIGridRedistributor:
                 # communication that needs to be done. 
 
                 # select the local data to send to the right(a) and left(a)
-                cell_datapos_for_a = datapos[position[:, d] > (self.rank_cell_limits[d,1]-overload_length[d])]
-                cell_datapos_for_b = datapos[position[:, d] < (self.rank_cell_limits[d,0]+overload_length[d])]
+                cell_datapos_for_a = datapos[position[:, d] > (self.rank_cell_limits[d,1]-overload_lengths[d])]
+                cell_datapos_for_b = datapos[position[:, d] < (self.rank_cell_limits[d,0]+overload_lengths[d])]
                 # selected overloaded data
-                buffer_datapos_for_a = overload_output[output_index][overload_output[1][:, d] > (self.rank_cell_limits[d,1]-overload_length[d])]
-                buffer_datapos_for_b = overload_output[output_index][overload_output[1][:, d] < (self.rank_cell_limits[d,0]+overload_length[d])]
+                buffer_datapos_for_a = overload_output[output_index][overload_output[1][:, d] > (self.rank_cell_limits[d,1]-overload_lengths[d])]
+                buffer_datapos_for_b = overload_output[output_index][overload_output[1][:, d] < (self.rank_cell_limits[d,0]+overload_lengths[d])]
 
                 # combine them into one array
-                datapos_for_a = np.concatenate([cell_datapos_for_a, buffer_datapos_for_a], axis = 0)
-                datapos_for_b = np.concatenate([cell_datapos_for_b, buffer_datapos_for_b], axis = 0)
-                
+                datapos_for_a = self._prepare_data_to_send([cell_datapos_for_a, buffer_datapos_for_a], send_data_cell_num_a)
+                datapos_for_b = self._prepare_data_to_send([cell_datapos_for_b, buffer_datapos_for_b], send_data_cell_num_a)
                 # we will send data to the right(a), and receive from the left(b)
                 send_datapos_a_req = self.comm.isend(datapos_for_a, dest=cell_num_a, tag=0)
                 recv_datapos_b_req = self.comm.irecv(source=cell_num_b, tag=0)
@@ -293,29 +303,30 @@ class MPIGridRedistributor:
                 send_datapos_b_req.wait()
                 # Now we should have all the data we need!
                 tmp = np.concatenate([overload_output[output_index], datapos_from_a, datapos_from_b])
-                # if self.rank ==0:
-                #     plt.figure()
-                #     plt.plot(datapos[:, 0], datapos[:, 1], 'xk')
-                #     plt.plot(datapos_from_a[:, 0], datapos_from_a[:,1], '.r')
-                #     plt.plot(datapos_from_b[:, 0], datapos_from_b[:,1], '.b')
-                #     plt.ylim([0,10])
-                #     plt.xlim([0,10])
-                #     plt.plot(tmp[:,0], tmp[:,1], 'g+')
-                # store the data into the right buffer. Either the "official" data or the position data
                 overload_output[output_index] = tmp
 
-            # if self.rank == 0:
-            #     plt.figure()
-            #     plt.plot(data[:,0], data[:, 1], 'xk')
-            #     plt.plot(overload_output[0][:,0], overload_output[0][:, 1], '.g')
-            #     plt.ylim([0,10])
-            #     plt.xlim([0,10])
-            #     plt.show()
-            # self.comm.Barrier()
         # return the "offical" overloaded data. The overloaded position data is thrown out. 
         return overload_output[0]
 
+    def stack_position(self, xyz_list):
+        return np.vstack(xyz_list).T
+        
+    def unstack_position(self, position):
+        result = []
+        for d in self.dim:
+            result.append(position[:,d])
+        return reusult
+    
+    def _prepare_data_to_send(self, data_list, keep_data):
+        if keep_data:
+            return np.concatenate(data_list, axis = 0)
+        else:
+            shape = np.array(data_list[0].shape)
+            shape[0] = 0
+            return np.zeros(shape, dtype=data_list[0].dtype)
 
+    def _peroidic_wrapping(self, data, box):
+        return ((data%box)+box)%box
     
 def redist():
     comm = MPI.COMM_WORLD
@@ -324,36 +335,63 @@ def redist():
     size = comm.Get_size()
     data = np.ones(size*10)*rank*100
     
-    data_size = 1000
+    data_size = np.int(4000/size)
     data = np.random.rand(data_size, 2)*10
 
-    redist = Redistributor(comm, [np.sqrt(size),np.sqrt(size)], [10,10])
-    # for i in range(0, size):
-    #     if rank == i:
-    #         print("{}/{}".format(rank, size))
-    #         plt.figure()
-    #         plt.plot(data[:, 0], data[:, 1], '.')
-    #         plt.ylim([0,10])
-    #         plt.xlim([0,10])
-    #     comm.Barrier()
-    num = redist.get_cell_number_from_position(data)
-    data2 = redist.redistribute_matrix_by_cell_number(data, num)
-    # if rank == 0:
-    #     print(data2)
-    # for i in range(0, size):
-    #     if rank == i and rank==0:
-    #         print("{}/{}".format(rank, size))
-    #         plt.figure()
-    #         plt.plot(data2[:, 0], data2[:, 1], '.')
-    #         plt.ylim([0,10])
-    #         plt.xlim([0,10])
-    #     comm.Barrier()
+    redist = MPIGridRedistributor(comm, [np.sqrt(size),np.sqrt(size)], [10,10])
+    data_cell_num = redist.get_cell_number_from_position(data)
+    data2 = redist.redistribute_by_cell_number(data, data_cell_num)
     position = data2
+    buffer_data = redist.exchange_overload_by_position(data2, position, [2, 2], peroidic=False)
 
-    buffer_data = redist.overload_buffer_matrix(data2, position, [2, 2])
-
-    data_local = redist.redistribute_matrix_by_position(data, data, overload_lenght =2)
+    data_local = redist.redistribute_by_position(data, data, overload_lengths =[2,2])
+    if rank ==0:
+        plt.figure()
+        plt.plot(data[:,0], data[:,1], 'xk', label = 'original data')
+        plt.plot(data2[:, 0], data2[:, 1], '.b', label = 'local cell data')
+        plt.plot(buffer_data[:, 0], buffer_data[:, 1], '.g', label = 'overload cell data')
+        plt.xlim([0,10])
+        plt.ylim([0,10])
+        plt.legend()
     plt.show()
 
+
+def redist_test2():
+    comm = MPI.COMM_WORLD
+    rank = comm.Get_rank()
+    size = comm.Get_size()
+
+    data_size = 1000
+    data = np.random.rand(data_size,2)*10
+    data[:, 1] = data[:, 1]
+
+    redsit = MPIGridRedistributor(comm, [np.sqrt(size), np.sqrt(size)], [10, 40])
+
+
+
+    redist= MPIGridRedistributor(comm, [np.sqrt(size),np.sqrt(size)], [10,10])
+    
+    data_struct = np.zeros(data_size, dtype=[('x', 'f4'), ('y', 'f4')])
+    data_struct['x'] = data[:,0]
+    data_struct['y'] = data[:,1]
+    pos = redist.stack_position([data_struct['x'], data_struct['y']])    
+    data_cell_num = redist.get_cell_number_from_position(pos)
+    data2 = redist.redistribute_by_cell_number(data_struct, data_cell_num)
+    position2 = redsit.stack_position([data2['x'], data2['y']])
+
+    buffer_data = redist.exchange_overload_by_position(data2, position2, [2, 2], peroidic=False)
+
+    data_local = redist.redistribute_by_position(data, data, overload_lengths =[2,2])
+    if rank ==0:
+        plt.figure()
+        plt.plot(data_struct['x'], data_struct['y'], 'xk', label = 'original data')
+        plt.plot(data2['x'], data2['y'], '.b', label = 'local cell data')
+        plt.plot(buffer_data['x'], buffer_data['y'], '.g', label = 'overload cell data')
+        plt.xlim([0,10])
+        plt.ylim([0,10])
+        plt.legend()
+    plt.show()
+    
 if __name__ == "__main__":
-    redist();
+    #redist();
+    redist_test2();
