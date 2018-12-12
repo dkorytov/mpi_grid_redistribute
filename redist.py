@@ -8,9 +8,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 
-def mpi_grid_redistribute(data, pos, grid_topology, box_lengths, comm , overload_lengths = None, peroidic=True):
+def mpi_grid_redistribute(data, pos, grid_topology, box_lengths, comm , overload_lengths = None, periodic=True):
     redist = MPIGridRedistributor(comm, grid_topology, box_lengths)
-    return redist.redistriubte_by_position(data, pos, overload_lengths = overload_lengths, peroidic=peroidic)
+    return redist.redistriubte_by_position(data, pos, overload_lengths = overload_lengths, periodic=periodic)
 
 class MPIGridRedistributor:
     def __init__(self, comm, grid_topology, box_length):
@@ -60,19 +60,19 @@ class MPIGridRedistributor:
         self.rank_cell_index = self.get_indexes_from_cell_number(np.array([self.rank]))[0]
         self.rank_cell_limits = self.get_cell_limits_from_indexes(np.array([self.rank_cell_index]))[0]
 
-    def get_cell_indexes_from_position(self, position, peroidic=True):
+    def get_cell_indexes_from_position(self, position, periodic=True):
         cell_indexes = np.zeros(( len(position), self.dim), dtype=np.int)
             
         for d in range(0, self.dim):
-            if peroidic:
-                position[:,d] =self._peroidic_wrapping(position[:,d], self.box_length[d])
+            if periodic:
+                position[:,d] =self._periodic_wrapping(position[:,d], self.box_length[d])
             data = (position[:,d]/self.box_length[d]*self.grid_topology[d]).astype(np.int)
             cell_indexes[:,d] = data
         return cell_indexes
 
-    def get_cell_number_from_indexes(self, indexes, peroidic=True, check_range=True):
+    def get_cell_number_from_indexes(self, indexes, periodic=True, check_range=True):
         cell_num = np.zeros(len(indexes), dtype=np.int)
-        if not peroidic:
+        if not periodic:
             for d in range(0, self.dim):
                 cell_num += self.cell_index_offset[d]*indexes[:,d]
             if check_range:
@@ -81,11 +81,11 @@ class MPIGridRedistributor:
                     cell_num[slct_outside] = -1
         else:
             for d in range(0, self.dim):
-                cell_num += self.cell_index_offset[d] * (self._peroidic_wrapping(indexes[:, d], self.grid_topology[d]))
+                cell_num += self.cell_index_offset[d] * (self._periodic_wrapping(indexes[:, d], self.grid_topology[d]))
         return cell_num
 
-    def get_cell_number_from_position(self, position, peroidic=True):
-        indexes = self.get_cell_indexes_from_position(position, peroidic=peroidic)
+    def get_cell_number_from_position(self, position, periodic=True):
+        indexes = self.get_cell_indexes_from_position(position, periodic=periodic)
         # these indexes are going to be within the range of allowed values
         return self.get_cell_number_from_indexes(indexes)
     
@@ -112,7 +112,7 @@ class MPIGridRedistributor:
             limits[:,d,1] = (cell_indexes[:, d]+1)*self.cell_length[d]
         return limits
 
-    def redistribute_by_position(self, data, position, peroidic=True, 
+    def redistribute_by_position(self, data, position, periodic=True, 
                                  overload_lengths = None, return_positions = False):
         """
 
@@ -132,10 +132,10 @@ class MPIGridRedistributor:
           The position of the data elements to be redistribtued. N is number
           of elements, d is dimension of the positions.
 
-        peroidic: boolean, default = True
-          if the position are peroidic or not. If they are, the position are 
+        periodic: boolean, default = True
+          if the position are periodic or not. If they are, the position are 
           wrapped according to the box_lengths specified in the constructor. if
-          not peroidic, then any data elements positioned outside of the box_lenghts
+          not periodic, then any data elements positioned outside of the box_lenghts
           are ignored and do not show up in the final result. 
    
         return_positions: boolean, default = false
@@ -154,7 +154,7 @@ class MPIGridRedistributor:
         """
 
         # TODO return positions
-        rank_to_send = self.get_cell_number_from_position(position, peroidic=peroidic)
+        rank_to_send = self.get_cell_number_from_position(position, periodic=periodic)
         assert np.min(rank_to_send) >= 0, "Trying to send to a negative rank. \nPosition is probably outside of box length"
         assert np.max(rank_to_send) < self.size, "Trying to send to a too rank number highre than max. \nPosition is probably outside of box length"
         local_data = self.redistribute_by_cell_number(data, rank_to_send)
@@ -200,7 +200,7 @@ class MPIGridRedistributor:
         return result
        
     def exchange_overload_by_position(self, data, position, overload_lengths, 
-                                      return_positions=False, peroidic=True):
+                                      return_positions=False, periodic=True):
         """
         This function takes in the data that is divided already into cells
         and overloads a region around them. Note: This function only uses
@@ -255,11 +255,11 @@ class MPIGridRedistributor:
             indexes_b = self.rank_cell_index + offset_b
             cell_num_a = self.get_cell_number_from_indexes(np.array([indexes_a]))[0] # rank num to the right
             cell_num_b = self.get_cell_number_from_indexes(np.array([indexes_b]))[0] # rank num to the left
-            if not peroidic:
-                # If we are talkign to a cell across a peroidic boundary, we will flag it and not
+            if not periodic:
+                # If we are talkign to a cell across a periodic boundary, we will flag it and not
                 # send any data
-                cell_num_a_2 = self.get_cell_number_from_indexes(np.array([indexes_a]), peroidic=False)[0] # rank num to the right
-                cell_num_b_2 = self.get_cell_number_from_indexes(np.array([indexes_b]), peroidic=False)[0] # rank num to the left
+                cell_num_a_2 = self.get_cell_number_from_indexes(np.array([indexes_a]), periodic=False)[0] # rank num to the right
+                cell_num_b_2 = self.get_cell_number_from_indexes(np.array([indexes_b]), periodic=False)[0] # rank num to the left
                 send_data_cell_num_a = cell_num_a_2 == cell_num_a
                 send_data_cell_num_b = cell_num_b_2 == cell_num_b
             else:
@@ -325,7 +325,7 @@ class MPIGridRedistributor:
             shape[0] = 0
             return np.zeros(shape, dtype=data_list[0].dtype)
 
-    def _peroidic_wrapping(self, data, box):
+    def _periodic_wrapping(self, data, box):
         return ((data%box)+box)%box
     
 def redist():
@@ -342,7 +342,7 @@ def redist():
     data_cell_num = redist.get_cell_number_from_position(data)
     data2 = redist.redistribute_by_cell_number(data, data_cell_num)
     position = data2
-    buffer_data = redist.exchange_overload_by_position(data2, position, [2, 2], peroidic=False)
+    buffer_data = redist.exchange_overload_by_position(data2, position, [2, 2], periodic=False)
 
     data_local = redist.redistribute_by_position(data, data, overload_lengths =[2,2])
     if rank ==0:
@@ -379,7 +379,7 @@ def redist_test2():
     data2 = redist.redistribute_by_cell_number(data_struct, data_cell_num)
     position2 = redsit.stack_position([data2['x'], data2['y']])
 
-    buffer_data = redist.exchange_overload_by_position(data2, position2, [2, 2], peroidic=False)
+    buffer_data = redist.exchange_overload_by_position(data2, position2, [2, 2], periodic=False)
 
     data_local = redist.redistribute_by_position(data, data, overload_lengths =[2,2])
     if rank ==0:
