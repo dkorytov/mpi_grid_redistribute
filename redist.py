@@ -102,6 +102,11 @@ class MPIGridRedistributor:
         """
         This function returns bounding box in each dimension for the
         given cell_indexes. 
+
+        Paramters: 
+        ----------
+        cell_indexes: matrix_like
+        
         """
         limits = np.zeros((len(cell_indexes),self.dim,2))
         for d in range(0, self.dim):
@@ -109,14 +114,48 @@ class MPIGridRedistributor:
             limits[:,d,1] = (cell_indexes[:, d]+1)*self.cell_length[d]
         return limits
 
-    def redistribute_by_position(self, data, peroidic=True, overload_length = None):
+    def redistribute_by_position(self, data, position, peroidic=True, 
+                                 overload_length = None, return_positions = False):
         """
 
         Note: This function only uses
         the immediate neighbors. If the overload length extends beyond the
         immediate neighbors, it will not capture all data that would be in 
         the overloaded zone. 
+        
+        Paramters:
+        ----------
+        data: matrix_like/list_like
+          The data to be redistributed. If it's a matrix, the frist
+          axis is taken as interator axis. So the first element would be 
+          data[0, :, :, ...], the second data[1, :, :, ...]
+        
+        position: matrix_like, shape=(N,d)
+          The position of the data elements to be redistribtued. N is number
+          of elements, d is dimension of the positions.
+
+        peroidic: boolean, default = True
+          if the position are peroidic or not. If they are, the position are 
+          wrapped according to the box_lengths specified in the constructor. if
+          not peroidic, then any data elements positioned outside of the box_lenghts
+          are ignored and do not show up in the final result. 
+   
+        return_positions: boolean, default = false
+        NOT IMPLMENTED
+          This flag will make the function return the redistributed positions as well. 
+          Typically the data will have the positions saved. But if memory is tight, we
+          can avoid duplicating data. 
+        
+        
+        Returns:
+        --------
+        local_data: same as data
+          The data that has been assigned to this local rank and any overload
+          data if the overload is specified
+        
         """
+
+        # TODO return positions
         rank_to_send = self.get_cell_number_from_position(position, peroidic=peroidic)
         assert np.min(rank_to_send) >= 0, "Trying to send to a negative rank. \nPosition is probably outside of box length"
         assert np.max(rank_to_send) < self.size, "Trying to send to a too rank number highre than max. \nPosition is probably outside of box length"
@@ -160,7 +199,7 @@ class MPIGridRedistributor:
             send_buff.append(data[rank_to_send==i])
         return np.concatenate(self.comm.alltoall(send_buff))
        
-    def overload_buffer_matrix(self, data, position, overload_length):
+    def overload_buffer_matrix(self, data, position, overload_length, return_positions=false):
         """
         This function takes in the data that is divided already into cells
         and overloads a region around them. Note: This function only uses
@@ -186,6 +225,14 @@ class MPIGridRedistributor:
         Returns
         -------
         local_overload_data: list/array_like/matrix_like
+          The data elements that belong the local rank's overload region. 
+
+        return_positions: boolean, default = false
+        NOT IMPLMENTED
+          This flag will make the function return the redistributed positions as well. 
+          Typically the data will have the positions saved. But if memory is tight, we
+          can avoid duplicating data. 
+
          
         """
 
