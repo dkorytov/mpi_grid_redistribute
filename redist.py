@@ -163,8 +163,8 @@ class MPIGridRedistributor:
         else:
             local_position = self.redistribute_by_cell_number(position, rank_to_send)
             overload_data = self.exchange_overload_by_position(local_data, local_position, overload_lengths)
-            np.concatenate((local_data, overload_data), axis = 0)
-        return 
+            return np.concatenate((local_data, overload_data), axis = 0)
+        
         
     def redistribute_by_cell_number(self, data, rank_to_send):
         """
